@@ -1,16 +1,19 @@
 use super::super::err::Error;
+use super::common::{AddressInfo, OverlappingSymbol};
+use libc::{c_int, c_void, dladdr, dlclose, dlerror, dlopen, Dl_info, RTLD_LAZY, RTLD_LOCAL};
 use std::ffi::{CStr, OsStr};
-use libc::{c_int, c_void, dlclose, dlerror, dlopen, dlsym, dladdr, Dl_info, RTLD_LAZY, RTLD_LOCAL};
-use std::ptr::{null, null_mut};
-use std::os::unix::ffi::OsStrExt;
 use std::io::{Error as IoError, ErrorKind};
 use std::mem::MaybeUninit;
-use super::common::{AddressInfo, OverlappingSymbol};
+use std::os::unix::ffi::OsStrExt;
+use std::ptr::{null, null_mut};
 
 const DEFAULT_FLAGS: c_int = RTLD_LOCAL | RTLD_LAZY;
 
 use std::sync::Mutex;
 
+extern "C" {
+    fn real_dlsym(handle: *mut c_void, symbol: *const libc::c_char) -> *mut c_void;
+}
 // calls to dlerror are not thread unsafe. Therefore we need to guard each call with a mutex
 
 lazy_static! {
@@ -24,7 +27,7 @@ pub unsafe fn get_sym(handle: Handle, name: &CStr) -> Result<*mut (), Error> {
     let _lock = DLERROR_MUTEX.lock();
     //clear the dlerror in order to be able to distinguish between NULL pointer and error
     let _ = dlerror();
-    let symbol = dlsym(handle, name.as_ptr());
+    let symbol = real_dlsym(handle, name.as_ptr());
     //This can be either error or just the library has a NULl pointer - legal
     if symbol.is_null() {
         let msg = dlerror();
@@ -78,34 +81,38 @@ pub unsafe fn open_lib(name: &OsStr) -> Result<Handle, Error> {
 }
 
 #[inline]
-pub unsafe fn addr_info_init(){}
+pub unsafe fn addr_info_init() {}
 
 #[inline]
-pub unsafe fn addr_info_cleanup(){}
+pub unsafe fn addr_info_cleanup() {}
 
 #[inline]
-pub unsafe fn addr_info_obtain(addr: * const ()) -> Result<AddressInfo, Error>{
-    let mut dlinfo = MaybeUninit::< Dl_info>::uninit();
-    let result = dladdr(addr as * const c_void, dlinfo.as_mut_ptr());
+pub unsafe fn addr_info_obtain(addr: *const ()) -> Result<AddressInfo, Error> {
+    let mut dlinfo = MaybeUninit::<Dl_info>::uninit();
+    let result = dladdr(addr as *const c_void, dlinfo.as_mut_ptr());
     let dlinfo = dlinfo.assume_init();
     if result == 0 {
-        Err(Error::AddrNotMatchingDll(IoError::new(ErrorKind::NotFound, String::new())))
+        Err(Error::AddrNotMatchingDll(IoError::new(
+            ErrorKind::NotFound,
+            String::new(),
+        )))
     } else {
         let os = if dlinfo.dli_saddr.is_null() || dlinfo.dli_sname.is_null() {
             None
         } else {
-            Some(OverlappingSymbol{
-                addr: dlinfo.dli_saddr as * const (),
-                name: CStr::from_ptr(dlinfo.dli_sname).to_string_lossy().into_owned()
+            Some(OverlappingSymbol {
+                addr: dlinfo.dli_saddr as *const (),
+                name: CStr::from_ptr(dlinfo.dli_sname)
+                    .to_string_lossy()
+                    .into_owned(),
             })
         };
-        Ok(AddressInfo{
+        Ok(AddressInfo {
             dll_path: OsStr::from_bytes(CStr::from_ptr(dlinfo.dli_fname).to_bytes()).to_os_string(),
-            dll_base_addr: dlinfo.dli_fbase as * const (),
-            overlapping_symbol: os
+            dll_base_addr: dlinfo.dli_fbase as *const (),
+            overlapping_symbol: os,
         })
     }
-
 }
 
 #[inline]
